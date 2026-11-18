@@ -1,0 +1,9 @@
+{
+  "appId": "com.grocery.smartpos",
+  "appName": "إدارة السوبر ماركت",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}
