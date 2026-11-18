@@ -439,19 +439,38 @@ export default function App() {
   const [extractedInvoiceItems, setExtractedInvoiceItems] = useState([]);
   const [invoiceSupplier, setInvoiceSupplier] = useState('');
 
+  // ضغط وتصغير الصورة قبل الإرسال لتسريع الذكاء الاصطناعي وتفادي أخطاء الحجم
+  const compressImageToBase64 = (file, maxWidth = 1024, quality = 0.78) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, maxWidth / img.width);
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          resolve(dataUrl.split(',')[1]);
+        };
+        img.onerror = reject;
+        img.src = event.target.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
   const analyzeImageWithGemini = async (file, mode) => {
     if (!file) return;
     setAiLoading(true);
 
     try {
-      const base64Data = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result.split(',')[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      const base64Data = await compressImageToBase64(file, 1024, 0.78);
 
-      if (!settings.geminiApiKey) {
+      if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
         setTimeout(() => {
           if (mode === 'product') {
             setPurchaseForm(prev => ({
@@ -463,7 +482,7 @@ export default function App() {
               sellPrice: 42,
               qty: 12
             }));
-            showToast('تم التعرف على بيانات العبوة تلقائياً (وضع التجربة - أضف مفتاح Gemini من الإعدادات للصور الحية)');
+            showToast('تم إدخال بيانات تجريبية — أضف مفتاح Gemini API من الإعدادات للقراءة الحقيقية');
           } else {
             setInvoiceSupplier('شركة التوزيع والمواد الغذائية');
             setExtractedInvoiceItems([
@@ -471,57 +490,81 @@ export default function App() {
               { name: 'مكرونة الملكة 400 جم', qty: 20, costPrice: 11, sellPrice: 14, unit: 'كيس' },
               { name: 'شاي العروسة 250 جم', qty: 15, costPrice: 48, sellPrice: 55, unit: 'عبوة' }
             ]);
-            showToast('تم استخراج أصناف الفاتورة في جدول المراجعة');
+            showToast('تم عرض فاتورة تجريبية — أضف مفتاح Gemini API من الإعدادات للقراءة الحقيقية');
           }
           setAiLoading(false);
-        }, 1200);
+        }, 900);
         return;
       }
 
       const prompt =
         mode === 'product'
-          ? 'اقرأ صورة عبوة المنتج واستخرج JSON فقط يحتوي على: {"name": "اسم المنتج والعلامة التجارية والوزن بالعربية", "category": "التصنيف", "unit": "عبوة أو كيلو أو قطعة"}'
-          : 'اقرأ صورة فاتورة المورد واستخرج JSON فقط يحتوي على: {"supplier": "اسم المورد", "items": [{"name": "اسم الصنف", "qty": 10, "costPrice": 25, "sellPrice": 30, "unit": "قطعة"}]}';
+          ? 'حلل صورة عبوة المنتج واستخرج البيانات بدقة باللغة العربية في كائن JSON بالمفاتيح التالية فقط: {"name": "اسم المنتج والعلامة التجارية والوزن أو الحجم", "category": "التصنيف", "unit": "قطعة أو عبوة أو كيلو أو لتر أو كرتونة"}'
+          : 'حلل صورة فاتورة المورد واستخرج الأصناف في كائن JSON بالمفاتيح التالية فقط: {"supplier": "اسم المورد إن وجد", "items": [{"name": "اسم الصنف", "qty": 1, "costPrice": 0, "sellPrice": 0, "unit": "قطعة"}]}';
 
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.geminiApiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.geminiApiKey.trim()}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: prompt },
-                { inlineData: { mimeType: file.type || 'image/jpeg', data: base64Data } }
-              ]
-            }]
+            generationConfig: {
+              responseMimeType: 'application/json',
+              temperature: 0.1
+            },
+            contents: [
+              {
+                parts: [
+                  { text: prompt },
+                  {
+                    inlineData: {
+                      mimeType: 'image/jpeg',
+                      data: base64Data
+                    }
+                  }
+                ]
+              }
+            ]
           })
         }
       );
 
       const data = await response.json();
+
+      if (!response.ok || data.error) {
+        const apiMsg = data?.error?.message || `خطأ في الاتصال (${response.status})`;
+        showToast(`خطأ Gemini: ${apiMsg}`, 'error');
+        return;
+      }
+
       const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (mode === 'product') {
-          setPurchaseForm(prev => ({
-            ...prev,
-            name: parsed.name || prev.name,
-            category: parsed.category || prev.category,
-            unit: parsed.unit || prev.unit
-          }));
-          showToast('تم قراءة اسم المنتج والوزن بالذكاء الاصطناعي بنجاح!');
-        } else if (mode === 'invoice' && Array.isArray(parsed.items)) {
-          setInvoiceSupplier(parsed.supplier || 'مورد عام');
-          setExtractedInvoiceItems(parsed.items);
-          showToast(`تم استخراج ${parsed.items.length} أصناف من فاتورة المورد!`);
+      const cleanedText = rawText.replace(/```json|```/gi, '').trim();
+      const parsed = JSON.parse(cleanedText);
+
+      if (mode === 'product') {
+        if (!parsed.name) {
+          showToast('لم يظهر اسم واضح على العبوة، قرّب الكاميرا من اسم المنتج', 'error');
+          return;
         }
-      } else {
-        showToast('تعذر قراءة النص بوضوح، حاول تصوير العبوة في إضاءة جيدة', 'error');
+        setPurchaseForm(prev => ({
+          ...prev,
+          name: parsed.name || prev.name,
+          category: parsed.category || prev.category,
+          unit: parsed.unit || prev.unit
+        }));
+        showToast('تم استخراج بيانات العبوة بنجاح!');
+      } else if (mode === 'invoice') {
+        const items = Array.isArray(parsed.items) ? parsed.items : [];
+        if (items.length === 0) {
+          showToast('لم يتم استخراج أصناف من الفاتورة، حاول تصويرها بشكل مستقيم', 'error');
+          return;
+        }
+        setInvoiceSupplier(parsed.supplier || 'مورد عام');
+        setExtractedInvoiceItems(items);
+        showToast(`تم استخراج ${items.length} أصناف للمراجعة`);
       }
     } catch (err) {
-      showToast('حدث خطأ أثناء الاتصال بالذكاء الاصطناعي', 'error');
+      showToast('تعذر تحليل الصورة، تأكد من وجود إنترنت ومفتاح API صحيح', 'error');
     } finally {
       setAiLoading(false);
     }
@@ -1316,7 +1359,7 @@ export default function App() {
                     accept="image/*"
                     capture="environment"
                     className="hidden"
-                    onChange={(e) => analyzeImageWithGemini(e.target.files?.[0], 'product')}
+                    onChange={(e) => { analyzeImageWithGemini(e.target.files?.[0], 'product'); e.target.value = ''; }}
                   />
                 </label>
 
@@ -1328,7 +1371,7 @@ export default function App() {
                     accept="image/*"
                     capture="environment"
                     className="hidden"
-                    onChange={(e) => analyzeImageWithGemini(e.target.files?.[0], 'invoice')}
+                    onChange={(e) => { analyzeImageWithGemini(e.target.files?.[0], 'invoice'); e.target.value = ''; }}
                   />
                 </label>
               </div>
