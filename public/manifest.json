@@ -1,0 +1,8 @@
+{
+  "short_name": "إدارة البقالة",
+  "name": "نظام إدارة السوبر ماركت والبقالة",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#065f46",
+  "background_color": "#f1f5f9"
+}
