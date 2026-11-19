@@ -439,8 +439,8 @@ export default function App() {
   const [extractedInvoiceItems, setExtractedInvoiceItems] = useState([]);
   const [invoiceSupplier, setInvoiceSupplier] = useState('');
 
-  // ضغط وتصغير الصورة قبل الإرسال لتسريع الذكاء الاصطناعي وتفادي أخطاء الحجم
-  const compressImageToBase64 = (file, maxWidth = 1024, quality = 0.78) => {
+  // ضغط وتصغير الصورة قبل الإرسال لتسريع الاستجابة وتقليل حجم البيانات
+  const compressImageToBase64 = (file, maxWidth = 768, quality = 0.72) => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = (event) => {
@@ -463,12 +463,82 @@ export default function App() {
     });
   };
 
+  // دالة استدعاء Gemini مع إعادة المحاولة التلقائية والتبديل لنموذج احتياطي عند الضغط
+  const callGeminiWithFallback = async (apiKey, prompt, base64Data) => {
+    const models = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-flash-latest'];
+    let lastError = 'تعذر الاتصال بخادم الذكاء الاصطناعي';
+
+    for (const model of models) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                generationConfig: {
+                  responseMimeType: 'application/json',
+                  temperature: 0.1
+                },
+                contents: [
+                  {
+                    parts: [
+                      { text: prompt },
+                      {
+                        inlineData: {
+                          mimeType: 'image/jpeg',
+                          data: base64Data
+                        }
+                      }
+                    ]
+                  }
+                ]
+              })
+            }
+          );
+
+          const data = await response.json();
+
+          if (response.ok && !data.error) {
+            return { ok: true, data };
+          }
+
+          const msg = data?.error?.message || `HTTP ${response.status}`;
+          lastError = msg;
+
+          // إذا كان الضغط مؤقتاً (503 أو 429 أو high demand) أعد المحاولة بعد ثانية ثم انتقل للنموذج الاحتياطي
+          const isOverloaded =
+            response.status === 503 ||
+            response.status === 429 ||
+            /high demand|overloaded|temporarily|rate limit/i.test(msg);
+
+          if (isOverloaded && attempt < 2) {
+            await new Promise(res => setTimeout(res, 1100));
+            continue;
+          }
+          // انتقل للنموذج التالي في القائمة
+          break;
+        } catch (err) {
+          lastError = 'فشل الاتصال بالإنترنت';
+          if (attempt < 2) {
+            await new Promise(res => setTimeout(res, 1000));
+            continue;
+          }
+          break;
+        }
+      }
+    }
+
+    return { ok: false, error: lastError };
+  };
+
   const analyzeImageWithGemini = async (file, mode) => {
     if (!file) return;
     setAiLoading(true);
 
     try {
-      const base64Data = await compressImageToBase64(file, 1024, 0.78);
+      const base64Data = await compressImageToBase64(file, 768, 0.72);
 
       if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
         setTimeout(() => {
@@ -502,42 +572,14 @@ export default function App() {
           ? 'حلل صورة عبوة المنتج واستخرج البيانات بدقة باللغة العربية في كائن JSON بالمفاتيح التالية فقط: {"name": "اسم المنتج والعلامة التجارية والوزن أو الحجم", "category": "التصنيف", "unit": "قطعة أو عبوة أو كيلو أو لتر أو كرتونة"}'
           : 'حلل صورة فاتورة المورد واستخرج الأصناف في كائن JSON بالمفاتيح التالية فقط: {"supplier": "اسم المورد إن وجد", "items": [{"name": "اسم الصنف", "qty": 1, "costPrice": 0, "sellPrice": 0, "unit": "قطعة"}]}';
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${settings.geminiApiKey.trim()}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            generationConfig: {
-              responseMimeType: 'application/json',
-              temperature: 0.1
-            },
-            contents: [
-              {
-                parts: [
-                  { text: prompt },
-                  {
-                    inlineData: {
-                      mimeType: 'image/jpeg',
-                      data: base64Data
-                    }
-                  }
-                ]
-              }
-            ]
-          })
-        }
-      );
+      const result = await callGeminiWithFallback(settings.geminiApiKey.trim(), prompt, base64Data);
 
-      const data = await response.json();
-
-      if (!response.ok || data.error) {
-        const apiMsg = data?.error?.message || `خطأ في الاتصال (${response.status})`;
-        showToast(`خطأ Gemini: ${apiMsg}`, 'error');
+      if (!result.ok) {
+        showToast(`خطأ Gemini: ${result.error}`, 'error');
         return;
       }
 
-      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const rawText = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       const cleanedText = rawText.replace(/```json|```/gi, '').trim();
       const parsed = JSON.parse(cleanedText);
 
