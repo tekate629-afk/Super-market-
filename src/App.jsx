@@ -173,7 +173,8 @@ export default function App() {
       storePhone: '01000000000',
       storeAddress: 'الإسكندرية - مصر',
       openingCash: 500,
-      geminiApiKey: ''
+      geminiApiKey: '',
+      openrouterApiKey: ''
     };
   });
 
@@ -533,14 +534,65 @@ export default function App() {
     return { ok: false, error: lastError };
   };
 
+  // دالة استدعاء OpenRouter Vision كمزوّد احتياطي سريع ومجاني عند ضغط Gemini
+  const callOpenRouterVision = async (apiKey, prompt, base64Data) => {
+    const orModels = [
+      'qwen/qwen2.5-vl-72b-instruct:free',
+      'meta-llama/llama-3.2-11b-vision-instruct:free',
+      'google/gemma-3-27b-it:free'
+    ];
+    let lastError = 'تعذر الاتصال بـ OpenRouter';
+
+    for (const model of orModels) {
+      try {
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://grocery-pos.local',
+            'X-Title': 'Smart Grocery POS'
+          },
+          body: JSON.stringify({
+            model,
+            temperature: 0.1,
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: prompt + ' أرجع JSON فقط بدون أي نص إضافي.' },
+                  {
+                    type: 'image_url',
+                    image_url: { url: `data:image/jpeg;base64,${base64Data}` }
+                  }
+                ]
+              }
+            ]
+          })
+        });
+
+        const data = await response.json();
+        if (response.ok && data?.choices?.[0]?.message?.content) {
+          return { ok: true, text: data.choices[0].message.content };
+        }
+        lastError = data?.error?.message || `OpenRouter HTTP ${response.status}`;
+      } catch (err) {
+        lastError = 'فشل الاتصال بخادم OpenRouter';
+      }
+    }
+    return { ok: false, error: lastError };
+  };
+
   const analyzeImageWithGemini = async (file, mode) => {
     if (!file) return;
     setAiLoading(true);
 
     try {
       const base64Data = await compressImageToBase64(file, 768, 0.72);
+      const geminiKey = (settings.geminiApiKey || '').trim();
+      const openrouterKey = (settings.openrouterApiKey || '').trim();
 
-      if (!settings.geminiApiKey || !settings.geminiApiKey.trim()) {
+      if (!geminiKey && !openrouterKey) {
         setTimeout(() => {
           if (mode === 'product') {
             setPurchaseForm(prev => ({
@@ -552,7 +604,7 @@ export default function App() {
               sellPrice: 42,
               qty: 12
             }));
-            showToast('تم إدخال بيانات تجريبية — أضف مفتاح Gemini API من الإعدادات للقراءة الحقيقية');
+            showToast('تم إدخال بيانات تجريبية — أضف مفتاح Gemini أو OpenRouter من الإعدادات للقراءة الحقيقية');
           } else {
             setInvoiceSupplier('شركة التوزيع والمواد الغذائية');
             setExtractedInvoiceItems([
@@ -560,7 +612,7 @@ export default function App() {
               { name: 'مكرونة الملكة 400 جم', qty: 20, costPrice: 11, sellPrice: 14, unit: 'كيس' },
               { name: 'شاي العروسة 250 جم', qty: 15, costPrice: 48, sellPrice: 55, unit: 'عبوة' }
             ]);
-            showToast('تم عرض فاتورة تجريبية — أضف مفتاح Gemini API من الإعدادات للقراءة الحقيقية');
+            showToast('تم عرض فاتورة تجريبية — أضف مفتاح Gemini أو OpenRouter من الإعدادات للقراءة الحقيقية');
           }
           setAiLoading(false);
         }, 900);
@@ -572,16 +624,40 @@ export default function App() {
           ? 'حلل صورة عبوة المنتج واستخرج البيانات بدقة باللغة العربية في كائن JSON بالمفاتيح التالية فقط: {"name": "اسم المنتج والعلامة التجارية والوزن أو الحجم", "category": "التصنيف", "unit": "قطعة أو عبوة أو كيلو أو لتر أو كرتونة"}'
           : 'حلل صورة فاتورة المورد واستخرج الأصناف في كائن JSON بالمفاتيح التالية فقط: {"supplier": "اسم المورد إن وجد", "items": [{"name": "اسم الصنف", "qty": 1, "costPrice": 0, "sellPrice": 0, "unit": "قطعة"}]}';
 
-      const result = await callGeminiWithFallback(settings.geminiApiKey.trim(), prompt, base64Data);
+      let rawText = '';
+      let usedProvider = '';
+      let lastErr = '';
 
-      if (!result.ok) {
-        showToast(`خطأ Gemini: ${result.error}`, 'error');
+      // 1. المحاولة الأولى عبر Gemini إذا كان المفتاح موجوداً
+      if (geminiKey) {
+        const result = await callGeminiWithFallback(geminiKey, prompt, base64Data);
+        if (result.ok) {
+          rawText = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          usedProvider = 'Gemini';
+        } else {
+          lastErr = result.error;
+        }
+      }
+
+      // 2. إذا لم ينجح Gemini أو كان مزدحماً، انتقل تلقائياً وفوراً إلى OpenRouter
+      if (!rawText && openrouterKey) {
+        const orRes = await callOpenRouterVision(openrouterKey, prompt, base64Data);
+        if (orRes.ok) {
+          rawText = orRes.text || '';
+          usedProvider = 'OpenRouter';
+        } else {
+          lastErr = lastErr ? `${lastErr} | OpenRouter: ${orRes.error}` : orRes.error;
+        }
+      }
+
+      if (!rawText) {
+        showToast(`تعذر التحليل: ${lastErr}`, 'error');
         return;
       }
 
-      const rawText = result.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       const cleanedText = rawText.replace(/```json|```/gi, '').trim();
-      const parsed = JSON.parse(cleanedText);
+      const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanedText);
 
       if (mode === 'product') {
         if (!parsed.name) {
@@ -594,7 +670,7 @@ export default function App() {
           category: parsed.category || prev.category,
           unit: parsed.unit || prev.unit
         }));
-        showToast('تم استخراج بيانات العبوة بنجاح!');
+        showToast(`تم استخراج بيانات العبوة بنجاح (${usedProvider})!`);
       } else if (mode === 'invoice') {
         const items = Array.isArray(parsed.items) ? parsed.items : [];
         if (items.length === 0) {
@@ -603,7 +679,7 @@ export default function App() {
         }
         setInvoiceSupplier(parsed.supplier || 'مورد عام');
         setExtractedInvoiceItems(items);
-        showToast(`تم استخراج ${items.length} أصناف للمراجعة`);
+        showToast(`تم استخراج ${items.length} أصناف للمراجعة (${usedProvider})`);
       }
     } catch (err) {
       showToast('تعذر تحليل الصورة، تأكد من وجود إنترنت ومفتاح API صحيح', 'error');
@@ -2037,6 +2113,19 @@ export default function App() {
                   value={settings.geminiApiKey}
                   onChange={(e) => setSettings({ ...settings, geminiApiKey: e.target.value })}
                   placeholder="AIzaSy..."
+                  className="w-full bg-slate-100 rounded-xl p-2.5 text-xs font-bold mt-1"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-600">
+                  مفتاح OpenRouter API Key (مزوّد احتياطي مجاني وسريع عند ضغط Gemini)
+                </label>
+                <input
+                  type="password"
+                  value={settings.openrouterApiKey || ''}
+                  onChange={(e) => setSettings({ ...settings, groqApiKey: e.target.value })}
+                  placeholder="sk-or-v1-..."
                   className="w-full bg-slate-100 rounded-xl p-2.5 text-xs font-bold mt-1"
                 />
               </div>
