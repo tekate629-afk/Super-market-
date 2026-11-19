@@ -503,7 +503,7 @@ export default function App() {
           : 'حلل صورة فاتورة المورد واستخرج الأصناف في كائن JSON بالمفاتيح التالية فقط: {"supplier": "اسم المورد إن وجد", "items": [{"name": "اسم الصنف", "qty": 1, "costPrice": 0, "sellPrice": 0, "unit": "قطعة"}]}';
 
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${settings.geminiApiKey.trim()}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${settings.geminiApiKey.trim()}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
